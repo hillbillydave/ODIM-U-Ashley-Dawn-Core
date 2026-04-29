@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Ashley Dawn Core – ODIM-U v3.x
-Informational-geometry-based atmospheric engine for:
-- national weather scanning
-- CAPE-style instability diagnostics
-- storm-path projection
-- basic entropic / dilation proxies
+Ashley Dawn Core v4.0
+ODIM-U Informational-Geometry Weather Engine
 
-This file is designed as a single, self-contained core module.
+Author: David E. Blackwell
+Hillbilly Storm Chasers Research Division
+
+Concept:
+    - Treat the atmosphere as an informational manifold.
+    - Compute entropic stress, processing flow, and dilation proxies.
+    - Fuse classical weather, geomagnetic stress, and ODIM-U metrics.
+    - Provide early warnings and a continental-scale informational map.
+
+This file is designed as a clean, extensible backbone:
+    - Safe to run as-is (with an API key if you enable OpenWeather).
+    - Easy to extend with ODIM-U v4.0, QSTF, warp-drive coupling, etc.
 """
 
 import os
@@ -21,87 +28,79 @@ from datetime import timezone
 
 import requests
 
-# =========================
+# ============================================================
 # CONFIGURATION
-# =========================
+# ============================================================
 
 DB_PATH = "ashley_memory.db"
 FORECAST_DIR = "ashley_forecasts"
 os.makedirs(FORECAST_DIR, exist_ok=True)
 
-# If True, use Open-Meteo; if False, use OpenWeather
-USE_OPEN_METEO = False
-OPENWEATHER_API_KEY = ""  # fill if using OpenWeather
+USE_OPEN_METEO = False          # If you want to wire Open-Meteo later
+OPENWEATHER_API_KEY = ""        # Set if you want live OpenWeather data
 
 REQUEST_HEADERS = {
-    "User-Agent": "ODIM-U_Ashley_Dawn_Core_v3.x (contact: your_email@example.com)"
+    "User-Agent": "ODIM-U_Ashley-Dawn-Core_v4.0 (contact: your_email@example.com)"
 }
 
-# =========================
+# ============================================================
 # DATABASE INITIALIZATION
-# =========================
+# ============================================================
 
 def init_memory():
-    """Initialize or upgrade the SQLite database schema."""
+    """
+    Initialize or upgrade the Ashley memory database.
+    Adds columns if they don't exist yet.
+    """
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    c.execute(
-        """
+    c.execute("""
         CREATE TABLE IF NOT EXISTS weather_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp DATETIME,
-            location TEXT,
-            pressure REAL,
-            temp REAL,
-            humidity REAL,
-            wind_speed REAL,
-            wind_deg REAL,
-            precip_prob REAL,
-            snowfall REAL,
-            snow_depth REAL,
-            cape REAL,
-            risk REAL,
-            kp REAL,
-            bz REAL,
-            entropic_proxy REAL,
-            dilation_proxy REAL
+            dt              DATETIME,
+            location        TEXT,
+            pressure        REAL,
+            temp            REAL,
+            humidity        REAL,
+            wind_speed      REAL,
+            wind_deg        REAL,
+            precip_prob     REAL,
+            snowfall        REAL,
+            snow_depth      REAL,
+            cape            REAL,
+            risk            REAL,
+            kp              REAL,
+            bz              REAL,
+            entropic_proxy  REAL,
+            dilation_proxy  REAL
         )
-        """
-    )
+    """)
 
-    # Ensure all expected columns exist (for older DBs)
+    # Ensure all columns exist (for older DBs)
     c.execute("PRAGMA table_info(weather_logs)")
     columns = [row[1] for row in c.fetchall()]
-    missing = [
-        "wind_speed",
-        "wind_deg",
-        "precip_prob",
-        "snowfall",
-        "snow_depth",
-        "cape",
-        "risk",
-        "kp",
-        "bz",
-        "entropic_proxy",
-        "dilation_proxy",
+    needed = [
+        "wind_speed", "wind_deg", "precip_prob", "snowfall", "snow_depth",
+        "cape", "risk", "kp", "bz", "entropic_proxy", "dilation_proxy"
     ]
-    for col in missing:
+    for col in needed:
         if col not in columns:
             c.execute(f"ALTER TABLE weather_logs ADD COLUMN {col} REAL")
 
     conn.commit()
     return conn
 
-# =========================
+# ============================================================
 # GEOPHYSICAL DATA HANDLERS
-# =========================
+# ============================================================
 
 def get_recent_earthquakes(min_magnitude=2.5, time_period="hour"):
-    """Pull recent USGS earthquakes as a crude proxy for crustal stress."""
+    """
+    Pull recent USGS earthquakes as a proxy for crustal stress.
+    """
     feeds = {
         "hour": "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_hour.geojson",
-        "day": "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson",
+        "day":  "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson",
     }
     url = feeds.get(time_period, feeds["hour"])
 
@@ -112,29 +111,24 @@ def get_recent_earthquakes(min_magnitude=2.5, time_period="hour"):
         for feature in data.get("features", [])[:10]:
             props = feature["properties"]
             coords = feature["geometry"]["coordinates"]
-            quakes.append(
-                {
-                    "mag": props.get("mag", 0),
-                    "place": props.get("place", "Unknown"),
-                    "time": datetime.datetime.fromtimestamp(
-                        props.get("time", 0) / 1000, tz=timezone.utc
-                    ),
-                    "lat": coords[1],
-                    "lon": coords[0],
-                    "depth_km": coords[2],
-                }
-            )
+            quakes.append({
+                "mag":   props.get("mag", 0),
+                "place": props.get("place", "Unknown"),
+                "time":  datetime.datetime.fromtimestamp(
+                    props.get("time", 0) / 1000, tz=timezone.utc
+                ),
+                "lat":   coords[1],
+                "lon":   coords[0],
+                "depth_km": coords[2],
+            })
         return quakes
     except Exception as e:
-        print(f"[USGS_EQU_ERROR] {e}")
+        print(f"[USGS_EQ_ERROR] {e}")
         return []
-
 
 def get_geomagnetic_data():
     """
-    Pull simple geomagnetic proxies:
-    - Kp index (planetary)
-    - Bz (IMF z-component)
+    Pull Kp and Bz as proxies for magnetospheric stress.
     """
     try:
         kp_url = "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json"
@@ -159,69 +153,21 @@ def get_geomagnetic_data():
         print(f"[GEO_ERROR] {e}")
         return {"kp": 0.0, "bz": 0.0}
 
-# =========================
-# ODIM-U ENTROPIC ENGINE
-# =========================
-
-class ODIMUEngine:
-    """
-    Minimal ODIM-U-style engine for entropic and dilation proxies.
-    This is not the full field theory—just a diagnostic layer that
-    echoes the monograph’s structure.
-    """
-
-    def __init__(self):
-        # Physical constants (SI)
-        self.kb = 1.380649e-23
-        self.hbar = 1.0545718e-34
-        self.c = 299_792_458.0
-
-        # Blackwell Limit (rough order-of-magnitude placeholder)
-        self.SB = 1.0e43  # bits/m^3 at Planck scale (conceptual)
-
-    def compute_entropic_proxy(self, cape, kp, bz):
-        """
-        Very simplified 'entropy proxy':
-        - higher CAPE, higher S_rel
-        - strong geomagnetic disturbance nudges it upward
-        """
-        cape_term = max(0.0, cape) / 2000.0  # normalize ~0–1
-        kp_term = max(0.0, kp) / 9.0
-        bz_term = max(0.0, -bz) / 20.0  # southward Bz increases stress
-
-        s_rel = (cape_term * 0.7) + (kp_term * 0.2) + (bz_term * 0.1)
-        # scale to something like 0–50 for logging
-        return s_rel * 50.0
-
-    def compute_dilation_proxy(self, entropic_proxy):
-        """
-        Map entropic proxy to an effective 'dilation' in ps/day.
-        This is a toy mapping, just to keep the conceptual link.
-        """
-        # treat entropic_proxy as fraction of SB in a tiny volume
-        frac = min(1.0, entropic_proxy / 50.0)
-        # simple nonlinear mapping
-        dilation_ps_per_day = 10.0 + 40.0 * (frac**2)
-        return dilation_ps_per_day
-
-
-# =========================
-# ASHLEY INTELLIGENCE CORE
-# =========================
+# ============================================================
+# ODIM-U / ASHLEY INTELLIGENCE CORE
+# ============================================================
 
 class AshleyIntelligence:
     """
-    Core diagnostic engine:
-    - computes Ashley-style CAPE
-    - classifies risk
-    - logs to SQLite
-    - ties in ODIM-U entropic/dilation proxies
+    Core intelligence layer:
+        - CAPE-like proxy (Ashley CAPE)
+        - Entropic proxy (ODIM-U v4.0 hook)
+        - Dilation proxy (time-stretch estimate)
+        - Risk classification
     """
 
     def __init__(self, conn):
         self.conn = conn
-        self.odim = ODIMUEngine()
-
         self.outlooks = {
             "A": "Settled_Fine",
             "B": "Fine_Weather",
@@ -233,39 +179,44 @@ class AshleyIntelligence:
             "S": "Significant_Snow_Expected",
         }
 
-    # ---------- CAPE / Instability ----------
-
+    # -------------------------------
+    # Ashley CAPE (effective CAPE)
+    # -------------------------------
     def calculate_ashley_cape(
         self,
         temp_c,
-        humidity_pct,
-        wind_speed_mps,
-        precip_prob_pct,
-        pressure_delta_hpa=0.0,
+        humidity,
+        wind_speed,
+        precip_prob,
+        pressure_delta=0.0,
         kp=0.0,
         bz=0.0,
-        nearby_quakes=0,
+        nearby_quakes=0
     ):
         """
-        Ashley-style CAPE proxy:
-        - thermal + moisture base
-        - shear, trigger, pressure, geomagnetic, and quake multipliers
+        Effective CAPE proxy that folds in:
+            - thermal buoyancy
+            - moisture
+            - shear
+            - trigger (precip probability)
+            - pressure tendency
+            - geomagnetic stress
+            - seismic agitation
         """
-        # crude temperature gate
-        if temp_c < 5.0:
+        if temp_c < 5:
             return 0.0
 
         thermal_base = max(0.0, (temp_c - 5.0) / 30.0)
-        thermal = thermal_base**3.0
+        thermal = thermal_base ** 3.0
 
-        if temp_c > 15.0:
-            moisture = min(1.0, humidity_pct / 90.0)
+        if temp_c > 15:
+            moisture = min(1.0, humidity / 90.0)
         else:
-            moisture = min(0.7, humidity_pct / 100.0)
+            moisture = min(0.7, humidity / 100.0)
 
-        shear = min(0.8, wind_speed_mps / 18.0)  # ~40 mph
-        trigger = min(0.8, precip_prob_pct / 150.0)
-        pressure_boost = max(0.0, -pressure_delta_hpa / 5.0)
+        shear = min(0.8, wind_speed / 40.0)
+        trigger = min(0.8, precip_prob / 150.0)
+        pressure_boost = max(0.0, -pressure_delta / 5.0)
 
         geo_factor = 0.0
         if kp >= 7:
@@ -276,340 +227,359 @@ class AshleyIntelligence:
         quake_factor = min(0.3, nearby_quakes * 0.05)
 
         base = (moisture + thermal) * 0.8
-        multipliers = 1.0 + shear + trigger + pressure_boost + geo_factor + quake_factor
+        multipliers = 1 + shear + trigger + pressure_boost + geo_factor + quake_factor
         raw = base * multipliers
 
         ecape = min(1800.0, math.log1p(raw * 5.0) * 600.0)
-        if temp_c < 10.0:
+        if temp_c < 10:
             ecape *= 0.5
 
         return round(ecape, 1)
 
-    def classify_risk(self, cape, temp_c, precip_prob_pct, snowfall_cm):
+    # -------------------------------
+    # ODIM-U v4.0: Entropic Proxy
+    # -------------------------------
+    def compute_entropic_proxy(self, cape, kp, bz, humidity, temp_c):
         """
-        Map CAPE + context to a coarse risk code.
+        Entropic stress proxy:
+            - Higher CAPE -> higher informational complexity
+            - Strong geomagnetic disturbance -> extra manifold stress
+            - Humidity + warm temps -> microstate explosion (mist, storms)
+        This is a scalar stand-in for S_rel density.
         """
-        if snowfall_cm >= 5.0 and temp_c <= 0.0:
-            return "S"  # significant snow
+        # Normalize inputs
+        cape_norm = min(1.0, cape / 2000.0)
+        kp_norm = min(1.0, kp / 9.0)
+        bz_norm = max(0.0, min(1.0, abs(min(bz, 0.0)) / 20.0))
+        hum_norm = min(1.0, humidity / 100.0)
+        temp_norm = min(1.0, max(0.0, (temp_c + 10.0) / 40.0))
 
-        if cape >= 1500.0 and precip_prob_pct >= 60.0:
-            return "T"  # tornado / severe
+        # Weighted combination (tunable)
+        entropic = (
+            0.45 * cape_norm +
+            0.20 * kp_norm +
+            0.15 * bz_norm +
+            0.10 * hum_norm +
+            0.10 * temp_norm
+        )
 
-        if cape >= 800.0 and precip_prob_pct >= 40.0:
-            return "Z"  # stormy / high volatility
+        # Scale to a more interpretable range (e.g., 0–100)
+        return round(entropic * 100.0, 2)
 
-        if cape >= 400.0:
-            return "E"  # showers likely / convective
+    # -------------------------------
+    # ODIM-U v4.0: Dilation Proxy
+    # -------------------------------
+    def compute_dilation_proxy(self, entropic_proxy):
+        """
+        Dilation proxy (ps/day or arbitrary units):
+            - Higher entropic stress -> slower effective "rendering speed"
+            - We model dilation as a nonlinear function of entropic load.
+        """
+        # Map entropic_proxy (0–100) to a fractional slowdown
+        x = entropic_proxy / 100.0
+        # Nonlinear amplification near high stress
+        slowdown_factor = 1.0 + 4.0 * (x ** 3)
 
-        if cape >= 150.0:
-            return "D"  # becoming less settled
+        # Base dilation scale (tunable). For now, treat as ps/day.
+        base_ps_per_day = 20.0
+        dilation = base_ps_per_day * slowdown_factor
+        return round(dilation, 3)
 
-        if cape >= 50.0:
-            return "C"  # becoming fine
+    # -------------------------------
+    # Risk Classification
+    # -------------------------------
+    def classify_risk(self, cape, entropic_proxy, temp_c, precip_prob, snowfall):
+        """
+        Map CAPE + entropic stress + precip/snow into a discrete risk code.
+        """
+        # Snow risk
+        if snowfall > 0.5 and temp_c <= 0:
+            return "S"
 
-        if cape > 0.0:
-            return "B"  # fine weather
+        # Tornado / severe convective risk
+        if cape > 1200 and entropic_proxy > 60 and precip_prob > 60:
+            return "T"
 
-        return "A"  # settled fine
+        # High volatility storms
+        if cape > 800 and entropic_proxy > 50:
+            return "Z"
 
-    # ---------- Logging ----------
+        # Showers likely
+        if precip_prob > 50 or cape > 300:
+            return "E"
 
+        # Fine / improving
+        if cape < 100 and entropic_proxy < 30 and precip_prob < 20:
+            return "A"
+
+        # Default mild unsettled
+        return "D"
+
+    # -------------------------------
+    # Logging
+    # -------------------------------
     def log_weather(
         self,
+        dt,
         location,
-        pressure_hpa,
-        temp_c,
-        humidity_pct,
-        wind_speed_mps,
+        pressure,
+        temp,
+        humidity,
+        wind_speed,
         wind_deg,
-        precip_prob_pct,
-        snowfall_cm,
-        snow_depth_cm,
+        precip_prob,
+        snowfall,
+        snow_depth,
         cape,
-        risk_code,
+        risk,
         kp,
         bz,
         entropic_proxy,
-        dilation_proxy,
+        dilation_proxy
     ):
         c = self.conn.cursor()
-        c.execute(
-            """
+        c.execute("""
             INSERT INTO weather_logs (
-                timestamp, location, pressure, temp, humidity,
-                wind_speed, wind_deg, precip_prob, snowfall, snow_depth,
-                cape, risk, kp, bz, entropic_proxy, dilation_proxy
+                dt, location, pressure, temp, humidity,
+                wind_speed, wind_deg, precip_prob,
+                snowfall, snow_depth, cape, risk,
+                kp, bz, entropic_proxy, dilation_proxy
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                datetime.datetime.now(tz=timezone.utc).isoformat(),
-                location,
-                pressure_hpa,
-                temp_c,
-                humidity_pct,
-                wind_speed_mps,
-                wind_deg,
-                precip_prob_pct,
-                snowfall_cm,
-                snow_depth_cm,
-                cape,
-                self.outlooks.get(risk_code, "Unknown"),
-                kp,
-                bz,
-                entropic_proxy,
-                dilation_proxy,
-            ),
-        )
+        """, (
+            dt, location, pressure, temp, humidity,
+            wind_speed, wind_deg, precip_prob,
+            snowfall, snow_depth, cape, risk,
+            kp, bz, entropic_proxy, dilation_proxy
+        ))
         self.conn.commit()
 
-    # ---------- Forecast / Scan Helpers ----------
-
-    def fetch_weather_for_city(self, name, lat, lon):
-        """
-        Fetch basic weather for a city using either Open-Meteo or OpenWeather.
-        Returns a dict with the fields we care about.
-        """
-        if USE_OPEN_METEO:
-            url = (
-                "https://api.open-meteo.com/v1/forecast"
-                f"?latitude={lat}&longitude={lon}"
-                "&hourly=temperature_2m,relativehumidity_2m,precipitation_probability,"
-                "snowfall,pressure_msl,windspeed_10m,winddirection_10m,snow_depth"
-                "&forecast_days=1&timezone=UTC"
-            )
-            resp = requests.get(url, timeout=15, headers=REQUEST_HEADERS)
-            data = resp.json()
-            hourly = data.get("hourly", {})
-            if not hourly:
-                raise RuntimeError("No hourly data from Open-Meteo")
-
-            # take the first hour as "now" proxy
-            temp_c = float(hourly["temperature_2m"][0])
-            humidity = float(hourly["relativehumidity_2m"][0])
-            precip_prob = float(hourly.get("precipitation_probability", [0])[0])
-            snowfall = float(hourly.get("snowfall", [0])[0])
-            pressure = float(hourly.get("pressure_msl", [1013])[0])
-            wind_speed = float(hourly.get("windspeed_10m", [0])[0])
-            wind_deg = float(hourly.get("winddirection_10m", [0])[0])
-            snow_depth = float(hourly.get("snow_depth", [0])[0])
-
-        else:
-            if not OPENWEATHER_API_KEY:
-                raise RuntimeError("OPENWEATHER_API_KEY not set and USE_OPEN_METEO=False")
-
-            url = (
-                "https://api.openweathermap.org/data/2.5/weather"
-                f"?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}&units=metric"
-            )
-            resp = requests.get(url, timeout=15, headers=REQUEST_HEADERS)
-            data = resp.json()
-
-            main = data.get("main", {})
-            wind = data.get("wind", {})
-            weather = data.get("weather", [{}])[0]
-
-            temp_c = float(main.get("temp", 15.0))
-            humidity = float(main.get("humidity", 60.0))
-            pressure = float(main.get("pressure", 1013.0))
-            wind_speed = float(wind.get("speed", 0.0))
-            wind_deg = float(wind.get("deg", 0.0))
-
-            # crude proxies
-            precip_prob = 60.0 if "rain" in weather.get("main", "").lower() else 10.0
-            snowfall = 0.0
-            snow_depth = 0.0
-
-        return {
-            "name": name,
-            "lat": lat,
-            "lon": lon,
-            "temp_c": temp_c,
-            "humidity": humidity,
-            "pressure": pressure,
-            "wind_speed": wind_speed,
-            "wind_deg": wind_deg,
-            "precip_prob": precip_prob,
-            "snowfall": snowfall,
-            "snow_depth": snow_depth,
-        }
-
-    def build_outlook_for_city(self, city, kp, bz, nearby_quakes_count=0):
-        """
-        Full pipeline for a single city:
-        - fetch weather
-        - compute CAPE
-        - classify risk
-        - compute entropic + dilation proxies
-        - log to DB
-        - return a compact summary dict
-        """
-        name, lat, lon = city
-        wx = self.fetch_weather_for_city(name, lat, lon)
-
-        # simple pressure delta placeholder (could be from history)
-        pressure_delta = 0.0
-
-        cape = self.calculate_ashley_cape(
-            temp_c=wx["temp_c"],
-            humidity_pct=wx["humidity"],
-            wind_speed_mps=wx["wind_speed"],
-            precip_prob_pct=wx["precip_prob"],
-            pressure_delta_hpa=pressure_delta,
-            kp=kp,
-            bz=bz,
-            nearby_quakes=nearby_quakes_count,
-        )
-
-        risk_code = self.classify_risk(
-            cape=cape,
-            temp_c=wx["temp_c"],
-            precip_prob_pct=wx["precip_prob"],
-            snowfall_cm=wx["snowfall"],
-        )
-
-        entropic_proxy = self.odim.compute_entropic_proxy(cape=cape, kp=kp, bz=bz)
-        dilation_proxy = self.odim.compute_dilation_proxy(entropic_proxy)
-
-        self.log_weather(
-            location=name,
-            pressure_hpa=wx["pressure"],
-            temp_c=wx["temp_c"],
-            humidity_pct=wx["humidity"],
-            wind_speed_mps=wx["wind_speed"],
-            wind_deg=wx["wind_deg"],
-            precip_prob_pct=wx["precip_prob"],
-            snowfall_cm=wx["snowfall"],
-            snow_depth_cm=wx["snow_depth"],
-            cape=cape,
-            risk_code=risk_code,
-            kp=kp,
-            bz=bz,
-            entropic_proxy=entropic_proxy,
-            dilation_proxy=dilation_proxy,
-        )
-
-        return {
-            "city": name,
-            "lat": lat,
-            "lon": lon,
-            "temp_c": wx["temp_c"],
-            "humidity": wx["humidity"],
-            "pressure": wx["pressure"],
-            "wind_speed": wx["wind_speed"],
-            "wind_deg": wx["wind_deg"],
-            "precip_prob": wx["precip_prob"],
-            "snowfall": wx["snowfall"],
-            "snow_depth": wx["snow_depth"],
-            "cape": cape,
-            "risk_code": risk_code,
-            "risk_label": self.outlooks.get(risk_code, "Unknown"),
-            "kp": kp,
-            "bz": bz,
-            "entropic_proxy": entropic_proxy,
-            "dilation_proxy_ps_per_day": dilation_proxy,
-        }
-
-# =========================
+# ============================================================
 # STORM PROJECTION HELPERS
-# =========================
+# ============================================================
 
-def project_path(lat, lon, bearing_deg, speed_mph, hours=1.0):
+def project_path(lat, lon, bearing, speed_mph, hours=1.0):
     """
-    Simple great-circle projection for a storm cell.
+    Simple great-circle projection for storm motion.
     """
     R = 3958.8  # Earth radius in miles
     distance_miles = speed_mph * hours
 
-    lat1, lon1, brng = map(math.radians, [lat, lon, bearing_deg])
+    lat1, lon1, brng = map(math.radians, [lat, lon, bearing])
     lat2 = math.asin(
-        math.sin(lat1) * math.cos(distance_miles / R)
-        + math.cos(lat1) * math.sin(distance_miles / R) * math.cos(brng)
+        math.sin(lat1) * math.cos(distance_miles / R) +
+        math.cos(lat1) * math.sin(distance_miles / R) * math.cos(brng)
     )
     lon2 = lon1 + math.atan2(
         math.sin(brng) * math.sin(distance_miles / R) * math.cos(lat1),
-        math.cos(distance_miles / R) - math.sin(lat1) * math.sin(lat2),
+        math.cos(distance_miles / R) - math.sin(lat1) * math.sin(lat2)
     )
-
     return math.degrees(lat2), (math.degrees(lon2) + 180) % 360 - 180
-
 
 def haversine(lat1, lon1, lat2, lon2):
     """
-    Haversine distance in miles.
+    Distance between two lat/lon points in miles.
     """
     R = 3958.8
     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
     dlat, dlon = lat2 - lat1, lon2 - lon1
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-    )
+    a = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return round(R * c, 1)
 
-# =========================
+# ============================================================
 # CITY LIST PLACEHOLDER
-# =========================
+# ============================================================
+
+# NOTE: Insert your full sentinel city list here.
+# For now, we leave a placeholder so you can paste the existing list
+# from your v3.0 paper or GitHub repo.
 
 CITY_LIST = [
     # ("City_Name, ST", lat, lon),
-    # e.g. ("Seattle, WA", 47.61, -122.33),
-    # TODO: paste your full sentinel network list here.
+    # e.g. ("Omaha, NE", 41.26, -96.01),
+    # TODO: PASTE FULL CITY LIST HERE
 ]
 
-# =========================
-# MAIN SCAN LOOP (EXAMPLE)
-# =========================
+# ============================================================
+# WEATHER FETCHING (SIMPLE OPENWEATHER WRAPPER)
+# ============================================================
 
-def run_network_scan():
+def fetch_openweather(lat, lon):
     """
-    Example: scan all cities in CITY_LIST once,
-    write JSON summaries, and log to DB.
+    Minimal OpenWeather fetch for a single point.
+    You can replace or augment this with Open-Meteo or your own feeds.
+    """
+    if not OPENWEATHER_API_KEY:
+        raise RuntimeError("OPENWEATHER_API_KEY not set.")
+
+    url = (
+        "https://api.openweathermap.org/data/2.5/weather"
+        f"?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}&units=metric"
+    )
+    resp = requests.get(url, timeout=10, headers=REQUEST_HEADERS)
+    data = resp.json()
+
+    main = data.get("main", {})
+    wind = data.get("wind", {})
+    rain = data.get("rain", {})
+    snow = data.get("snow", {})
+
+    pressure = main.get("pressure", 1013.0)
+    temp = main.get("temp", 15.0)
+    humidity = main.get("humidity", 50.0)
+    wind_speed = wind.get("speed", 5.0)
+    wind_deg = wind.get("deg", 0.0)
+
+    precip_prob = 0.0
+    if "1h" in rain:
+        precip_prob = min(100.0, rain["1h"] * 50.0)
+    snowfall = snow.get("1h", 0.0)
+    snow_depth = snowfall  # placeholder
+
+    return {
+        "pressure": pressure,
+        "temp": temp,
+        "humidity": humidity,
+        "wind_speed": wind_speed,
+        "wind_deg": wind_deg,
+        "precip_prob": precip_prob,
+        "snowfall": snowfall,
+        "snow_depth": snow_depth,
+    }
+
+# ============================================================
+# CORE SCAN LOOP
+# ============================================================
+
+def run_scan():
+    """
+    Single full-network scan:
+        - Pull geomagnetic + quake context
+        - For each city:
+            - Fetch weather
+            - Compute CAPE, entropic proxy, dilation proxy, risk
+            - Log to DB
+            - Save a simple JSON forecast snapshot
     """
     conn = init_memory()
     ashley = AshleyIntelligence(conn)
 
     geo = get_geomagnetic_data()
-    kp = geo["kp"]
-    bz = geo["bz"]
+    kp, bz = geo["kp"], geo["bz"]
 
     quakes = get_recent_earthquakes(time_period="day")
-    nearby_quakes_count = len(quakes)
+    quake_count = len(quakes)
 
-    summaries = []
-    for city in CITY_LIST:
+    now = datetime.datetime.now(timezone.utc)
+
+    for city_name, lat, lon in CITY_LIST:
         try:
-            summary = ashley.build_outlook_for_city(
-                city=city,
+            wx = fetch_openweather(lat, lon)
+
+            pressure = wx["pressure"]
+            temp = wx["temp"]
+            humidity = wx["humidity"]
+            wind_speed = wx["wind_speed"]
+            wind_deg = wx["wind_deg"]
+            precip_prob = wx["precip_prob"]
+            snowfall = wx["snowfall"]
+            snow_depth = wx["snow_depth"]
+
+            # For now, we don't track pressure tendency; set 0
+            pressure_delta = 0.0
+
+            cape = ashley.calculate_ashley_cape(
+                temp_c=temp,
+                humidity=humidity,
+                wind_speed=wind_speed,
+                precip_prob=precip_prob,
+                pressure_delta=pressure_delta,
                 kp=kp,
                 bz=bz,
-                nearby_quakes_count=nearby_quakes_count,
+                nearby_quakes=quake_count
             )
-            summaries.append(summary)
-            print(
-                f"[{summary['city']}] CAPE={summary['cape']:.1f} "
-                f"Risk={summary['risk_label']} "
-                f"Dilation={summary['dilation_proxy_ps_per_day']:.2f} ps/day"
-            )
-        except Exception as e:
-            print(f"[CITY_ERROR] {city[0]} -> {e}")
 
-    # Save a snapshot forecast file
-    ts = datetime.datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
-    out_path = os.path.join(FORECAST_DIR, f"ashley_forecast_{ts}.json")
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "timestamp_utc": ts,
+            entropic_proxy = ashley.compute_entropic_proxy(
+                cape=cape,
+                kp=kp,
+                bz=bz,
+                humidity=humidity,
+                temp_c=temp
+            )
+
+            dilation_proxy = ashley.compute_dilation_proxy(entropic_proxy)
+
+            risk_code = ashley.classify_risk(
+                cape=cape,
+                entropic_proxy=entropic_proxy,
+                temp_c=temp,
+                precip_prob=precip_prob,
+                snowfall=snowfall
+            )
+
+            ashley.log_weather(
+                dt=now.isoformat(),
+                location=city_name,
+                pressure=pressure,
+                temp=temp,
+                humidity=humidity,
+                wind_speed=wind_speed,
+                wind_deg=wind_deg,
+                precip_prob=precip_prob,
+                snowfall=snowfall,
+                snow_depth=snow_depth,
+                cape=cape,
+                risk=risk_code,
+                kp=kp,
+                bz=bz,
+                entropic_proxy=entropic_proxy,
+                dilation_proxy=dilation_proxy
+            )
+
+            # Save a simple forecast snapshot
+            snapshot = {
+                "timestamp": now.isoformat(),
+                "city": city_name,
+                "lat": lat,
+                "lon": lon,
+                "pressure": pressure,
+                "temp": temp,
+                "humidity": humidity,
+                "wind_speed": wind_speed,
+                "wind_deg": wind_deg,
+                "precip_prob": precip_prob,
+                "snowfall": snowfall,
+                "snow_depth": snow_depth,
+                "cape": cape,
+                "risk_code": risk_code,
                 "kp": kp,
                 "bz": bz,
-                "cities": summaries,
-            },
-            f,
-            indent=2,
-        )
-    print(f"[SNAPSHOT] wrote {out_path}")
+                "entropic_proxy": entropic_proxy,
+                "dilation_proxy": dilation_proxy,
+            }
 
+            safe_name = city_name.replace(" ", "_").replace(",", "")
+            out_path = os.path.join(
+                FORECAST_DIR,
+                f"{safe_name}_{now.strftime('%Y%m%d_%H%M%S')}.json"
+            )
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, indent=2)
+
+            print(f"[OK] {city_name}: CAPE={cape}, Entropic={entropic_proxy}, "
+                  f"Dilation={dilation_proxy}, Risk={risk_code}")
+
+        except Exception as e:
+            print(f"[CITY_ERROR] {city_name}: {e}")
+
+    conn.close()
+
+# ============================================================
+# MAIN
+# ============================================================
 
 if __name__ == "__main__":
-    run_network_scan()
+    print("Ashley Dawn Core v4.0 — ODIM-U Informational Weather Engine")
+    print("Starting single scan of sentinel network...")
+    run_scan()
+    print("Scan complete.")
